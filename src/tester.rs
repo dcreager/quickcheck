@@ -281,6 +281,28 @@ impl TestResult {
     }
 }
 
+impl From<bool> for TestResult {
+    fn from(value: bool) -> TestResult {
+        TestResult::from_bool(value)
+    }
+}
+
+impl From<()> for TestResult {
+    fn from(_value: ()) -> TestResult {
+        TestResult::passed()
+    }
+}
+
+impl<A, E> From<Result<A, E>> for TestResult
+        where A: Into<TestResult>, E: Debug + Send + 'static {
+    fn from(value: Result<A, E>) -> TestResult {
+        match value {
+            Ok(r) => r.into(),
+            Err(err) => TestResult::error(format!("{:?}", err)),
+        }
+    }
+}
+
 /// `Testable` describes types (e.g., a function) whose values can be
 /// tested.
 ///
@@ -296,32 +318,6 @@ pub trait Testable : Send + 'static {
     fn result<G: Gen>(&self, &mut G) -> TestResult;
 }
 
-impl Testable for bool {
-    fn result<G: Gen>(&self, _: &mut G) -> TestResult {
-        TestResult::from_bool(*self)
-    }
-}
-
-impl Testable for () {
-    fn result<G: Gen>(&self, _: &mut G) -> TestResult {
-        TestResult::passed()
-    }
-}
-
-impl Testable for TestResult {
-    fn result<G: Gen>(&self, _: &mut G) -> TestResult { self.clone() }
-}
-
-impl<A, E> Testable for Result<A, E>
-        where A: Testable, E: Debug + Send + 'static {
-    fn result<G: Gen>(&self, g: &mut G) -> TestResult {
-        match *self {
-            Ok(ref r) => r.result(g),
-            Err(ref err) => TestResult::error(format!("{:?}", err)),
-        }
-    }
-}
-
 /// Return a vector of the debug formatting of each item in `args`
 fn debug_reprs(args: &[&dyn Debug]) -> Vec<String> {
     args.iter().map(|x| format!("{:?}", x)).collect()
@@ -330,18 +326,18 @@ fn debug_reprs(args: &[&dyn Debug]) -> Vec<String> {
 macro_rules! testable_fn {
     ($($name: ident),*) => {
 
-impl<T: Testable,
+impl<T: Into<TestResult> + Send + 'static,
      $($name: Arbitrary + Debug),*> Testable for fn($($name),*) -> T {
     #[allow(non_snake_case)]
     fn result<G_: Gen>(&self, g: &mut G_) -> TestResult {
-        fn shrink_failure<T: Testable, G_: Gen, $($name: Arbitrary + Debug),*>(
+        fn shrink_failure<T: Into<TestResult> + Send + 'static, G_: Gen, $($name: Arbitrary + Debug),*>(
             g: &mut G_,
             self_: fn($($name),*) -> T,
             a: ($($name,)*),
         ) -> Option<TestResult> {
             for t in a.shrink() {
                 let ($($name,)*) = t.clone();
-                let mut r_new = safe(move || {self_($($name),*)}).result(g);
+                let mut r_new = TestResult::from(safe(move || {self_($($name),*)}));
                 if r_new.is_failure() {
                     {
                         let ($(ref $name,)*) : ($($name,)*) = t;
@@ -363,7 +359,7 @@ impl<T: Testable,
         let self_ = *self;
         let a: ($($name,)*) = Arbitrary::arbitrary(g);
         let ( $($name,)* ) = a.clone();
-        let mut r = safe(move || {self_($($name),*)}).result(g);
+        let mut r = TestResult::from(safe(move || {self_($($name),*)}));
 
         {
             let ( $(ref $name,)* ) = a;
