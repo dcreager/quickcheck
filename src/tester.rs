@@ -118,6 +118,21 @@ impl<G: Gen> QuickCheck<G> {
         self
     }
 
+    fn shrunken_result<A>(&mut self, f: &A, input: &A::Domain) -> TestResult
+        where A: Testable, A::Domain: Arbitrary 
+    {
+        let result = f.result(input.clone());
+        if result.is_failure() {
+            for t in input.shrink() {
+                let r_new = self.shrunken_result(f, &t);
+                if r_new.is_failure() {
+                    return r_new;
+                }
+            }
+        }
+        result
+    }
+
     /// Tests a property and returns the result.
     ///
     /// The result returned is either the number of tests passed or a witness
@@ -126,13 +141,15 @@ impl<G: Gen> QuickCheck<G> {
     /// (If you're using Rust's unit testing infrastructure, then you'll
     /// want to use the `quickcheck` method, which will `panic!` on failure.)
     pub fn quicktest<A>(&mut self, f: A) -> Result<u64, TestResult>
-                    where A: Testable {
+                    where A: Testable, A::Domain: Arbitrary {
         let mut n_tests_passed = 0;
         for _ in 0..self.max_tests {
             if n_tests_passed >= self.tests {
                 break
             }
-            match f.result(&mut self.gen) {
+            let input = Arbitrary::arbitrary(&mut self.gen);
+            let result = self.shrunken_result(&f, &input);
+            match result {
                 TestResult { status: Pass, .. } => n_tests_passed += 1,
                 TestResult { status: Discard, .. } => continue,
                 r @ TestResult { status: Fail, .. } => return Err(r),
@@ -167,7 +184,7 @@ impl<G: Gen> QuickCheck<G> {
     ///     QuickCheck::new().quickcheck(revrev as fn(Vec<usize>) -> bool);
     /// }
     /// ```
-    pub fn quickcheck<A>(&mut self, f: A) where A: Testable {
+    pub fn quickcheck<A>(&mut self, f: A) where A: Testable, A::Domain: Arbitrary {
         // Ignore log init failures, implying it has already been done.
         let _ = ::env_logger_init();
 
@@ -190,7 +207,7 @@ impl<G: Gen> QuickCheck<G> {
 /// Convenience function for running QuickCheck.
 ///
 /// This is an alias for `QuickCheck::new().quickcheck(f)`.
-pub fn quickcheck<A: Testable>(f: A) { QuickCheck::new().quickcheck(f) }
+pub fn quickcheck<A>(f: A) where A: Testable, A::Domain: Arbitrary { QuickCheck::new().quickcheck(f) }
 
 /// Describes the status of a single instance of a test.
 ///
@@ -315,7 +332,8 @@ impl<A, E> From<Result<A, E>> for TestResult
 ///
 /// It's unlikely that you'll have to implement this trait yourself.
 pub trait Testable : Send + 'static {
-    fn result<G: Gen>(&self, &mut G) -> TestResult;
+    type Domain;
+    fn result(&self, input: Self::Domain) -> TestResult;
 }
 
 /// Return a vector of the debug formatting of each item in `args`
@@ -327,50 +345,20 @@ macro_rules! testable_fn {
     ($($name: ident),*) => {
 
 impl<T: Into<TestResult> + Send + 'static,
-     $($name: Arbitrary + Debug),*> Testable for fn($($name),*) -> T {
+     $($name: Debug + Send + 'static),*> Testable for fn($($name),*) -> T {
+    type Domain = ($($name,)*);
+
     #[allow(non_snake_case)]
-    fn result<G_: Gen>(&self, g: &mut G_) -> TestResult {
-        fn shrink_failure<T: Into<TestResult> + Send + 'static, G_: Gen, $($name: Arbitrary + Debug),*>(
-            g: &mut G_,
-            self_: fn($($name),*) -> T,
-            a: ($($name,)*),
-        ) -> Option<TestResult> {
-            for t in a.shrink() {
-                let ($($name,)*) = t.clone();
-                let mut r_new = TestResult::from(safe(move || {self_($($name),*)}));
-                if r_new.is_failure() {
-                    {
-                        let ($(ref $name,)*) : ($($name,)*) = t;
-                        r_new.arguments = debug_reprs(&[$($name),*]);
-                    }
-
-                    // The shrunk value *does* witness a failure, so keep
-                    // trying to shrink it.
-                    let shrunk = shrink_failure(g, self_, t);
-
-                    // If we couldn't witness a failure on any shrunk value,
-                    // then return the failure we already have.
-                    return Some(shrunk.unwrap_or(r_new))
-                }
-            }
-            None
-        }
-
+    fn result(&self, input: Self::Domain) -> TestResult {
+        let args = {
+            let ( $(ref $name,)* ) = input;
+            debug_reprs(&[$($name),*])
+        };
         let self_ = *self;
-        let a: ($($name,)*) = Arbitrary::arbitrary(g);
-        let ( $($name,)* ) = a.clone();
+        let ( $($name,)* ) = input;
         let mut r = TestResult::from(safe(move || {self_($($name),*)}));
-
-        {
-            let ( $(ref $name,)* ) = a;
-            r.arguments = debug_reprs(&[$($name),*]);
-        }
-        match r.status {
-            Pass|Discard => r,
-            Fail => {
-                shrink_failure(g, self_, a).unwrap_or(r)
-            }
-        }
+        r.arguments = args;
+        r
     }
 }}}
 
